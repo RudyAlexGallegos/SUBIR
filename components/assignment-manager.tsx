@@ -1,9 +1,8 @@
-
 "use client"
 
 import { useState, useMemo, FormEvent, useEffect } from "react"
 import { v4 as uuidv4 } from "uuid"
-import { format, subDays, isSameDay, parseISO } from "date-fns"
+import { format, subDays, isSameDay, parseISO, getDay } from "date-fns"
 import { es } from "date-fns/locale"
 import { jsPDF } from "jspdf"
 import "jspdf-autotable"
@@ -75,6 +74,7 @@ interface AttendanceRecord {
   refereeId: string
   date: string
   present: boolean
+  meetingType: string
 }
 
 interface AssignmentReferee {
@@ -156,6 +156,21 @@ export default function AssignmentManager({
   const [matchDate, setMatchDate] = useState<Date>(new Date())
   const [selectedChampionship, setSelectedChampionship] = useState<string>("all")
 
+  // Función para obtener árbitros que asistieron el viernes
+  const getFridayAttendees = useMemo(() => {
+    const fridayAttendees = new Set<string>()
+    
+    attendance.forEach(record => {
+      const recordDate = parseISO(record.date)
+      // Viernes es el día 5 en date-fns (0 es domingo)
+      if (getDay(recordDate) === 5 && record.present) {
+        fridayAttendees.add(record.refereeId)
+      }
+    })
+    
+    return referees.filter(referee => fridayAttendees.has(referee.id))
+  }, [attendance, referees])
+
   // Función para verificar árbitros duplicados
   const checkDuplicateReferees = (assignment: Assignment, isEditing = false): string[] => {
     const errors: string[] = []
@@ -198,33 +213,6 @@ export default function AssignmentManager({
 
     return errors
   }
-
-  // Árbitros elegibles
-  const eligibleReferees = useMemo(() => {
-    const today = new Date()
-    const thirtyDaysAgo = subDays(today, 30)
-    const attendanceStats = new Map<string, { present: number; total: number }>()
-
-    referees.forEach(referee => {
-      attendanceStats.set(referee.id, { present: 0, total: 0 })
-    })
-
-    attendance.forEach(record => {
-      const recordDate = new Date(record.date)
-      if (recordDate >= thirtyDaysAgo && recordDate <= today) {
-        const stats = attendanceStats.get(record.refereeId)
-        if (stats) {
-          stats.total++
-          if (record.present) stats.present++
-        }
-      }
-    })
-
-    return referees.filter(referee => {
-      const stats = attendanceStats.get(referee.id)
-      return stats ? stats.total === 0 || stats.present / stats.total >= 0.7 : true
-    })
-  }, [referees, attendance])
 
   // Manejadores de formulario
   const handleAddSubmit = (e: FormEvent) => {
@@ -367,150 +355,73 @@ export default function AssignmentManager({
     }
   }
 
-  // DE AQUI NO TOCAR
- // Exportar a PDF individual
-const exportToPDF = (assignment: Assignment) => {
-  try {
-    const doc = new jsPDF()
-    const championship = getChampionshipById(assignment.championshipId)
+  // Exportar a PDF individual
+  const exportToPDF = (assignment: Assignment) => {
+    try {
+      const doc = new jsPDF()
+      const championship = getChampionshipById(assignment.championshipId)
+      const duplicateErrors = checkDuplicateReferees(assignment)
 
-    doc.setFont("helvetica", "bold")
-    doc.setFontSize(18)
-    doc.setTextColor(0, 0, 139)
-    doc.text("DESIGNACIÓN ARBITRAL", 105, 20, { align: "center" })
+      // Título principal
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(18)
+      doc.setTextColor(0, 0, 139)
+      doc.text("COMISIÓN DEPARTAMENTAL DE ÁRBITROS", 105, 15, { align: "center" })
 
-    doc.setFont("helvetica", "normal")
-    doc.setFontSize(12)
-    doc.setTextColor(0, 0, 0)
-    doc.text(`Campeonato: ${championship?.name || 'No especificado'}`, 20, 35)
-    doc.text(`Partido: ${assignment.matchName || 'No especificado'}`, 20, 45)
-    doc.text(`Fecha: ${assignment.matchDate ? format(parseISO(assignment.matchDate), "dd/MM/yyyy") : 'No especificada'}`, 20, 55)
-    doc.text(`Hora: ${assignment.matchTime || 'No especificada'}`, 20, 65)
-    doc.text(`Ubicación: ${assignment.location || 'No especificada'}`, 20, 75)
+      // Subtítulo
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(14)
+      doc.text("DESEMPEÑO ARBITRAL", 105, 22, { align: "center" })
 
-    doc.setFont("helvetica", "bold")
-    doc.text("Árbitros Designados:", 20, 90)
-    doc.setFont("helvetica", "normal")
+      // Información de la designación
+      doc.setFontSize(12)
+      doc.setTextColor(0, 0, 0)
+      doc.text(`Campeonato: ${championship?.name || 'No especificado'}`, 20, 35)
+      doc.text(`Partido: ${assignment.matchName || 'No especificado'}`, 20, 45)
+      doc.text(`Fecha: ${assignment.matchDate ? format(parseISO(assignment.matchDate), "dd/MM/yyyy") : 'No especificada'}`, 20, 55)
+      doc.text(`Hora: ${assignment.matchTime || 'No especificada'}`, 20, 65)
+      doc.text(`Ubicación: ${assignment.location || 'No especificada'}`, 20, 75)
 
-    assignment.referees.forEach((ref, index) => {
-      const referee = getRefereeById(ref.id)
-      const yPosition = 100 + (index * 10)
-
-      doc.text(`${ref.role}:`, 25, yPosition)
-      doc.text(`${referee?.name || 'No asignado'} (${referee?.category || 'N/A'})`, 60, yPosition)
-
-      if (referee && !eligibleReferees.some(r => r.id === referee.id)) {
-        doc.setTextColor(255, 165, 0)
-        doc.text("(Baja Asistencia)", 130, yPosition)
+      // Advertencias de duplicados
+      let yPosition = 90
+      if (duplicateErrors.length > 0) {
+        doc.setFont("helvetica", "bold")
+        doc.setTextColor(255, 0, 0)
+        doc.text("ADVERTENCIAS DE ASIGNACIÓN:", 20, yPosition)
+        yPosition += 10
+        
+        doc.setFont("helvetica", "normal")
+        doc.setFontSize(10)
+        duplicateErrors.forEach(error => {
+          const splitText = doc.splitTextToSize(error, 170)
+          splitText.forEach((line: string, i: number) => {
+            doc.text(line, 25, yPosition + (i * 5))
+          })
+          yPosition += splitText.length * 5 + 5
+        })
+        yPosition += 10
         doc.setTextColor(0, 0, 0)
       }
-    })
 
-    let yPosition = 100 + (assignment.referees.length * 10)
-
-    if (assignment.notes) {
+      // Árbitros designados
       doc.setFont("helvetica", "bold")
-      doc.text("Notas:", 20, yPosition + 10)
-      doc.setFont("helvetica", "normal")
-      const splitNotes = doc.splitTextToSize(assignment.notes, 170)
-      doc.text(splitNotes, 25, yPosition + 20)
-      yPosition += splitNotes.length * 7
-    }
-
-    // Firma
-    doc.setFont("helvetica", "italic")
-    doc.setFontSize(11)
-    doc.text("_________________________", 20, 260)
-    doc.text("Responsable de Designaciones", 20, 268)
-
-    // Pie de página
-    doc.setFontSize(10)
-    doc.setTextColor(100)
-    doc.text(`Generado el ${format(new Date(), "dd/MM/yyyy HH:mm")}`, 105, 285, { align: "center" })
-
-    const fileName = `Designacion_${assignment.matchName.replace(/\s+/g, '_') || 'designacion'}.pdf`
-    doc.save(fileName)
-    toast.success("PDF generado correctamente")
-
-  } catch (error) {
-    console.error("Error al generar PDF:", error)
-    toast.error("Ocurrió un error al generar el PDF")
-  }
-}
-
-// Exportar todas las designaciones
-const exportAllToPDF = () => {
-  try {
-    if (assignments.length === 0) {
-      toast.warning("No hay designaciones para exportar")
-      return
-    }
-
-    const doc = new jsPDF({
-      orientation: "landscape",
-      unit: "mm"
-    })
-
-    doc.setFont("helvetica", "bold")
-    doc.setFontSize(20)
-    doc.setTextColor(0, 0, 139)
-    doc.text("DESIGNACIONES CODAR PUNO", 148, 15, { align: "center" })
-
-    doc.setFontSize(10)
-    doc.setFont("helvetica", "normal")
-    doc.setTextColor(0, 0, 0)
-    doc.text(`Total de designaciones: ${assignments.length}`, 20, 25)
-    doc.text(`Fecha de generación: ${format(new Date(), "dd/MM/yyyy HH:mm")}`, 250, 25)
-
-    let yPosition = 35
-
-    assignments.forEach((assignment, index) => {
-      const championship = getChampionshipById(assignment.championshipId)
-
-      if (yPosition > 180) {
-        // Firma antes de saltar de página
-        doc.setFont("helvetica", "italic")
-        doc.setFontSize(11)
-        doc.text("_________________________", 20, 190)
-        doc.text("Responsable de Designaciones", 20, 198)
-
-        doc.addPage("landscape")
-        yPosition = 20
-      }
-
-      doc.setFontSize(14)
-      doc.setFont("helvetica", "bold")
-      doc.text(`Designación #${index + 1}`, 20, yPosition)
-      yPosition += 10
-
       doc.setFontSize(12)
-      doc.setFont("helvetica", "normal")
-      doc.text(`Campeonato: ${championship?.name || 'No especificado'}`, 20, yPosition)
-      yPosition += 10
-      doc.text(`Partido: ${assignment.matchName || 'No especificado'}`, 20, yPosition)
-      yPosition += 10
-      doc.text(`Fecha: ${assignment.matchDate ? format(parseISO(assignment.matchDate), "dd/MM/yyyy") : 'No especificada'}`, 20, yPosition)
-      yPosition += 10
-      doc.text(`Hora: ${assignment.matchTime || 'No especificada'}`, 20, yPosition)
-      yPosition += 10
-      doc.text(`Ubicación: ${assignment.location || 'No especificada'}`, 20, yPosition)
-      yPosition += 15
-
-      doc.setFont("helvetica", "bold")
       doc.text("Árbitros Designados:", 20, yPosition)
       yPosition += 10
       doc.setFont("helvetica", "normal")
 
-      assignment.referees.forEach((ref, refIndex) => {
+      assignment.referees.forEach((ref, index) => {
         const referee = getRefereeById(ref.id)
-        const yRefPosition = yPosition + (refIndex * 10)
+        const yRefPosition = yPosition + (index * 10)
 
         doc.text(`${ref.role}:`, 25, yRefPosition)
         doc.text(`${referee?.name || 'No asignado'} (${referee?.category || 'N/A'})`, 60, yRefPosition)
 
-        if (referee && !eligibleReferees.some(r => r.id === referee.id)) {
-          doc.setTextColor(255, 165, 0)
-          doc.text("(Baja Asistencia)", 130, yRefPosition)
+        // Verificar si el árbitro asistió el viernes
+        const attendedFriday = getFridayAttendees.some(r => r.id === ref.id)
+        if (!attendedFriday && ref.id) {
+          doc.setTextColor(255, 0, 0)
+          doc.text("(No asistió el viernes)", 130, yRefPosition)
           doc.setTextColor(0, 0, 0)
         }
       })
@@ -522,38 +433,177 @@ const exportAllToPDF = () => {
         doc.text("Notas:", 20, yPosition)
         yPosition += 8
         doc.setFont("helvetica", "normal")
-        const splitNotes = doc.splitTextToSize(assignment.notes, 230)
+        const splitNotes = doc.splitTextToSize(assignment.notes, 170)
         doc.text(splitNotes, 25, yPosition)
         yPosition += splitNotes.length * 7
       }
 
-      doc.setDrawColor(200, 200, 200)
-      doc.line(20, yPosition, 280, yPosition)
-      yPosition += 10
-    })
+      // Firma
+      doc.setFont("helvetica", "italic")
+      doc.setFontSize(11)
+      doc.text("_________________________", 20, 260)
+      doc.text("Responsable de Designaciones", 20, 268)
 
-    // Firma final
-    doc.setFont("helvetica", "italic")
-    doc.setFontSize(11)
-    doc.text("_________________________", 20, yPosition + 10)
-    doc.text("Responsable de Designaciones", 20, yPosition + 18)
+      // Pie de página
+      doc.setFontSize(10)
+      doc.setTextColor(100)
+      doc.text(`Generado el ${format(new Date(), "dd/MM/yyyy HH:mm")}`, 105, 285, { align: "center" })
 
-    // Pie de página
-    doc.setFontSize(10)
-    doc.setTextColor(100)
-    doc.text(`Generado el ${format(new Date(), "dd/MM/yyyy HH:mm")}`, 148, 205, { align: "center" })
+      const fileName = `Designacion_${assignment.matchName.replace(/\s+/g, '_') || 'designacion'}.pdf`
+      doc.save(fileName)
+      toast.success("PDF generado correctamente")
 
-    const fileName = `Designaciones_${format(new Date(), "yyyy-MM-dd")}.pdf`
-    doc.save(fileName)
-    toast.success(`PDF con ${assignments.length} designaciones generado correctamente`)
-
-  } catch (error) {
-    console.error("Error al generar PDF:", error)
-    toast.error("Ocurrió un error al generar el PDF")
+    } catch (error) {
+      console.error("Error al generar PDF:", error)
+      toast.error("Ocurrió un error al generar el PDF")
+    }
   }
-}
 
-/// DE AQUI NO TOCAR
+  // Exportar todas las designaciones
+  const exportAllToPDF = () => {
+    try {
+      if (assignments.length === 0) {
+        toast.warning("No hay designaciones para exportar")
+        return
+      }
+
+      const doc = new jsPDF({
+        orientation: "landscape",
+        unit: "mm"
+      })
+
+      // Título principal
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(20)
+      doc.setTextColor(0, 0, 139)
+      doc.text("COMISIÓN DEPARTAMENTAL DE ÁRBITROS", 148, 15, { align: "center" })
+
+      // Subtítulo
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(16)
+      doc.text("DESEMPEÑO ARBITRAL", 148, 22, { align: "center" })
+
+      // Información del reporte
+      doc.setFontSize(10)
+      doc.setFont("helvetica", "normal")
+      doc.setTextColor(0, 0, 0)
+      doc.text(`Total de designaciones: ${assignments.length}`, 20, 35)
+      doc.text(`Fecha de generación: ${format(new Date(), "dd/MM/yyyy HH:mm")}`, 250, 35)
+
+      let yPosition = 45
+
+      assignments.forEach((assignment, index) => {
+        const championship = getChampionshipById(assignment.championshipId)
+        const duplicateErrors = checkDuplicateReferees(assignment)
+
+        if (yPosition > 180) {
+          // Firma antes de saltar de página
+          doc.setFont("helvetica", "italic")
+          doc.setFontSize(11)
+          doc.text("_________________________", 20, 190)
+          doc.text("Responsable de Designaciones", 20, 198)
+
+          doc.addPage("landscape")
+          yPosition = 20
+        }
+
+        doc.setFontSize(14)
+        doc.setFont("helvetica", "bold")
+        doc.text(`Designación #${index + 1}`, 20, yPosition)
+        yPosition += 10
+
+        doc.setFontSize(12)
+        doc.setFont("helvetica", "normal")
+        doc.text(`Campeonato: ${championship?.name || 'No especificado'}`, 20, yPosition)
+        yPosition += 10
+        doc.text(`Partido: ${assignment.matchName || 'No especificado'}`, 20, yPosition)
+        yPosition += 10
+        doc.text(`Fecha: ${assignment.matchDate ? format(parseISO(assignment.matchDate), "dd/MM/yyyy") : 'No especificada'}`, 20, yPosition)
+        yPosition += 10
+        doc.text(`Hora: ${assignment.matchTime || 'No especificada'}`, 20, yPosition)
+        yPosition += 10
+        doc.text(`Ubicación: ${assignment.location || 'No especificada'}`, 20, yPosition)
+        yPosition += 15
+
+        // Advertencias de duplicados
+        if (duplicateErrors.length > 0) {
+          doc.setFont("helvetica", "bold")
+          doc.setTextColor(255, 0, 0)
+          doc.text("ADVERTENCIAS DE ASIGNACIÓN:", 20, yPosition)
+          yPosition += 10
+          
+          doc.setFont("helvetica", "normal")
+          doc.setFontSize(10)
+          duplicateErrors.forEach(error => {
+            const splitText = doc.splitTextToSize(error, 230)
+            splitText.forEach((line: string, i: number) => {
+              doc.text(line, 25, yPosition + (i * 5))
+            })
+            yPosition += splitText.length * 5 + 5
+          })
+          yPosition += 10
+          doc.setTextColor(0, 0, 0)
+        }
+
+        doc.setFont("helvetica", "bold")
+        doc.text("Árbitros Designados:", 20, yPosition)
+        yPosition += 10
+        doc.setFont("helvetica", "normal")
+
+        assignment.referees.forEach((ref, refIndex) => {
+          const referee = getRefereeById(ref.id)
+          const yRefPosition = yPosition + (refIndex * 10)
+
+          doc.text(`${ref.role}:`, 25, yRefPosition)
+          doc.text(`${referee?.name || 'No asignado'} (${referee?.category || 'N/A'})`, 60, yRefPosition)
+
+          // Verificar si el árbitro asistió el viernes
+          const attendedFriday = getFridayAttendees.some(r => r.id === ref.id)
+          if (!attendedFriday && ref.id) {
+            doc.setTextColor(255, 0, 0)
+            doc.text("(No asistió el viernes)", 130, yRefPosition)
+            doc.setTextColor(0, 0, 0)
+          }
+        })
+
+        yPosition += assignment.referees.length * 10 + 10
+
+        if (assignment.notes) {
+          doc.setFont("helvetica", "bold")
+          doc.text("Notas:", 20, yPosition)
+          yPosition += 8
+          doc.setFont("helvetica", "normal")
+          const splitNotes = doc.splitTextToSize(assignment.notes, 230)
+          doc.text(splitNotes, 25, yPosition)
+          yPosition += splitNotes.length * 7
+        }
+
+        doc.setDrawColor(200, 200, 200)
+        doc.line(20, yPosition, 280, yPosition)
+        yPosition += 10
+      })
+
+      // Firma final
+      doc.setFont("helvetica", "italic")
+      doc.setFontSize(11)
+      doc.text("_________________________", 20, yPosition + 10)
+      doc.text("Responsable de Designaciones", 20, yPosition + 18)
+
+      // Pie de página
+      doc.setFontSize(10)
+      doc.setTextColor(100)
+      doc.text(`Generado el ${format(new Date(), "dd/MM/yyyy HH:mm")}`, 148, 205, { align: "center" })
+
+      const fileName = `Designaciones_${format(new Date(), "yyyy-MM-dd")}.pdf`
+      doc.save(fileName)
+      toast.success(`PDF con ${assignments.length} designaciones generado correctamente`)
+
+    } catch (error) {
+      console.error("Error al generar PDF:", error)
+      toast.error("Ocurrió un error al generar el PDF")
+    }
+  }
+
   // Verificación de duplicidades en tiempo real
   useEffect(() => {
     if (newAssignment.referees.length > 0) {
@@ -639,16 +689,16 @@ const exportAllToPDF = () => {
                         <div className="space-y-1">
                           {assignment.referees.map((ref, index) => {
                             const referee = getRefereeById(ref.id)
-                            const isEligible = eligibleReferees.some(r => r.id === ref.id)
+                            const attendedFriday = getFridayAttendees.some(r => r.id === ref.id)
                             return (
                               <div 
                                 key={index} 
                                 className={`text-sm ${
-                                  !isEligible ? 'text-amber-600' : ''
+                                  !attendedFriday && ref.id ? 'text-red-600' : ''
                                 }`}
                               >
                                 {ref.role}: {referee?.name || "No asignado"} ({referee?.category || "N/A"})
-                                {!isEligible && " (Baja asistencia)"}
+                                {!attendedFriday && ref.id && " (No asistió el viernes)"}
                               </div>
                             )
                           })}
@@ -718,6 +768,7 @@ const exportAllToPDF = () => {
             <DialogTitle>Agregar Nueva Designación</DialogTitle>
             <DialogDescription>
               Complete los campos para agregar una nueva designación arbitral.
+              Solo se pueden asignar árbitros que asistieron el día viernes.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleAddSubmit} className="space-y-4">
@@ -811,7 +862,7 @@ const exportAllToPDF = () => {
             </div>
             
             <div>
-              <Label>Árbitros</Label>
+              <Label>Árbitros (solo los que asistieron el viernes)</Label>
               <div className="space-y-2">
                 {newAssignment.referees.map((ref, index) => (
                   <div key={index} className="flex items-center gap-2">
@@ -824,7 +875,7 @@ const exportAllToPDF = () => {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="NONE">Sin árbitro</SelectItem>
-                        {referees.map(referee => (
+                        {getFridayAttendees.map(referee => (
                           <SelectItem key={referee.id} value={referee.id}>
                             {referee.name} ({referee.category})
                           </SelectItem>
@@ -892,6 +943,7 @@ const exportAllToPDF = () => {
             <DialogTitle>Editar Designación</DialogTitle>
             <DialogDescription>
               Edite los campos de la designación arbitral.
+              Solo se pueden asignar árbitros que asistieron el día viernes.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleEditSubmit} className="space-y-4">
@@ -987,7 +1039,7 @@ const exportAllToPDF = () => {
                 </div>
                 
                 <div>
-                  <Label>Árbitros</Label>
+                  <Label>Árbitros (solo los que asistieron el viernes)</Label>
                   <div className="space-y-2">
                     {editingAssignment.referees.map((ref, index) => (
                       <div key={index} className="flex items-center gap-2">
@@ -1000,7 +1052,7 @@ const exportAllToPDF = () => {
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="NONE">Sin árbitro</SelectItem>
-                            {referees.map(referee => (
+                            {getFridayAttendees.map(referee => (
                               <SelectItem key={referee.id} value={referee.id}>
                                 {referee.name} ({referee.category})
                               </SelectItem>
